@@ -5,14 +5,12 @@ var tcpp = require('tcp-ping');
 AWS.config.update({region: 'us-east-1'});
 
 const tableName = 'lambda-healthcheck-v1';
-const readCapacity = 4;
-const writeCapacity = 1;
+
 
 var dynamodb = new AWS.DynamoDB();
 
-getTable(tableName, readCapacity, writeCapacity);
-
-
+getInstances()
+getTable(tableName);
 
 
 
@@ -25,31 +23,29 @@ tcpp.probe('www.google.com', 80, function(err, data) {
 function getInstances() {
     var ec2 = new AWS.EC2();
 
-    ec2.describeInstances(
-        {
-            Filters: [
-                {
+    var test = ec2.describeInstances(
+        {Filters: [{
                     Name: 'tag:tcp_healthcheck',
                     Values: [
                         'true',
                     ]
-                },
-            ]
-        }
+        }]}
     ).promise()
-        .then(function(data) {
+        .then(data => {
             console.log('Success');
-        }).catch(function(err) {
+            console.log(data[0].privateIpAddress);
+        })
+        .catch(function(err) {
         console.log(err);
     });
 }
 
 /* Retrieve a DynamoDB table to store tcp ping results, create it if does not exsist */
-function getTable(tableName, readCapacity, writeCapacity) {
+function getTable(tableName, readCapacity=4, writeCapacity=1) {
 
     const tablePromise = dynamodb.listTables({}) // get list of tables
     .promise()
-    .then((data) => { // filter by tableName
+    .then(data => { // filter by tableName
         const exists = data.TableNames
             .filter(name => {
                 return name === tableName;
