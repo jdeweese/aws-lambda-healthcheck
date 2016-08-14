@@ -6,9 +6,11 @@ AWS.config.update({region: 'us-east-1'});
 
 const tableName = 'lambda-healthcheck-v1';
 const tagName = 'tcp_healthcheck';
+const maxMissed = 3;
 
 var dynamodb = new AWS.DynamoDB();
 var docClient = new AWS.DynamoDB.DocumentClient();
+var autoscaling = new AWS.AutoScaling();
 
 createTable(tableName) // create the table in DynamoDB if does not exsist
     .then(getInstances(tagName)) // pull all the instances by tag that need to be health checked and perform checks
@@ -55,7 +57,7 @@ function checkInstance(instance){
     ).then( // insert results into dynamodb
         data => putInstanceIntoDB(instance, data)
     ).then( // set EC2 unhealthy
-        () => setInstanceHealth(instance, 0)
+        missedCount => setInstanceHealth(instance, missedCount)
     );
 }
 
@@ -63,23 +65,19 @@ function checkInstance(instance){
 /**
  *
  */
-function setInstanceHealth(instance, health) {
-    const healthStatus = ['Unhealth','Healthy'];
+function setInstanceHealth(instance, missedCount) {
+
+    // if missed count is greater that the max then the instance is unhealthy
+    var healthStatus = (missedCount > maxMissed)? healthStatus='Unhealthy':healthStatus='Healthy';
+
     var params = {
-        InstanceId: instanceId,
-        HealthStatus: healthStatus[health],
-        ShouldRespectGracePeriod: false
+        InstanceId: instance.InstanceId,
+        HealthStatus: healthStatus,
+        ShouldRespectGracePeriod: true
     };
-
-    ASG_AWS.setInstanceHealth(params, function (err, data) { //TODO: Finish here
-        if (err) {
-            cb(err, null);
-        } else {
-            cb(null, data);
-        }
-    })
+    console.log(instance.InstanceId +' is '+ healthStatus +' with a missed count of '+ missedCount);
+    autoscaling.setInstanceHealth(params).promise().catch(reason => {console.log('ERROR '+ reason)}); // request a promise for error handling
 }
-
 
 
 /**
@@ -87,59 +85,60 @@ function setInstanceHealth(instance, health) {
  */
 function putInstanceIntoDB(instance, results){
 
-    //TODO: Remove any old db instance entries
+    return new Promise(function (fulfill, reject) {
+        //TODO: Remove any old db instance entries
 
-    var DbPromise = null;
-    if(results.min == undefined){ // IF ping failed
-        let instance_id = { // GET instance from db
-            TableName:tableName,
-            Key:{'ec2-id': instance.InstanceId}
-        };
-        docClient.get(instance_id).promise()
+        var instance_id = {  //query parameters to find instance in dynamodb
+                TableName: tableName,
+                Key: {'ec2-id': instance.InstanceId}
+            };
+
+
+        docClient.get(instance_id).promise() // get instance from db
             .then(data => { // THEN
-                if(data.Item != undefined){ // IF there is already an entry for the instance add one to failed count
+                var missedCount = 0;
+                var pingReturned = (results.min != undefined); // true if ping returned
+
+                if (data.Item != undefined) { // IF there is already an entry
+                    missedCount = pingReturned ? 0 : data.Item.missed_count + 1; // IF ping returned set to 0 ELSE increment missed count by 1
                     let update_instance = {
-                        TableName:tableName,
-                        Key:{'ec2-id': instance.InstanceId},
+                        TableName: tableName,
+                        Key: {'ec2-id': instance.InstanceId},
                         UpdateExpression: "set missed_count=:m, last_seen=:l",
-                        ExpressionAttributeValues:{
-                            ":m": data.Item.missed_count + 1, // increment missed count by 1
+                        ExpressionAttributeValues: {
+                            ":m": missedCount,
                             ":l": Date.now()
                         },
-                        ReturnValues:"UPDATED_NEW"
+                        ReturnValues: "UPDATED_NEW"
                     };
-                    DbPromise = docClient.update(update_instance).promise(); // set promise to db UPDATE action
+                    if (missedCount != data.Item.missed_count) // only update if missed count changed
+                        docClient.update(update_instance).promise(); // set promise to db UPDATE action
 
-                } else{ // ELSE if no entry add one with failed count of one
+                } else if (!pingReturned) { // ELSE if no entry AND ping did not return add one with failed count of one
+                    missedCount = 1;
                     console.log('Adding ID to table: ' + instance.InstanceId);
                     let add_instance = {
-                        TableName:tableName,
+                        TableName: tableName,
                         Item: {
                             'ec2-id': instance.InstanceId,
-                            'missed_count': 1,
+                            'missed_count': missedCount,
                             'last_seen': Date.now()
                         }
                     }
-                    DbPromise =  docClient.put(add_instance).promise(); // set promise to db PUT action
+                    docClient.put(add_instance).promise(); // set promise to db PUT action
                 }
+                fulfill(missedCount); // return the missed count in the promise
             });
-        console.log('Instance not responding: ' + instance.InstanceId,  );
 
-    } else {
-        console.log('Pinged instance successfully: ' + instance.InstanceId);
+      //  console.log('Instance not responding: ' + instance.InstanceId); //TODO: Add better logging outputs
 
-    }
 
-    dbPromise = Promise.resolve(); // return a empty promise for successful pings, no database action required
-
-    return DbPromise;
-
+    })
 }
 
 /**
- *
+ * Retrieve a DynamoDB table to store tcp ping results, create it if does not exist
  */
-/* Retrieve a DynamoDB table to store tcp ping results, create it if does not exsist */
 function createTable(tableName, readCapacity = 4, writeCapacity = 1) {
 
     return tablePromise = dynamodb.listTables({}).promise() // get a list of tables
@@ -160,7 +159,7 @@ function createTable(tableName, readCapacity = 4, writeCapacity = 1) {
                     ProvisionedThroughput: {
                         ReadCapacityUnits: readCapacity,
                         WriteCapacityUnits: writeCapacity
-                    },
+                    }
                 };
                 return dynamodb.createTable(params).promise();
             }
