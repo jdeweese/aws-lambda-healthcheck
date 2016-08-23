@@ -12,6 +12,7 @@ var dynamodb = new AWS.DynamoDB();
 var docClient = new AWS.DynamoDB.DocumentClient();
 var autoscaling = new AWS.AutoScaling();
 
+
 createTable(tableName) // create the table in DynamoDB if does not exsist
     .then(getInstances(tagName)) // pull all the instances by tag that need to be health checked and perform checks
     .catch(function (err) {
@@ -24,7 +25,7 @@ createTable(tableName) // create the table in DynamoDB if does not exsist
 function getInstances() {
     var ec2 = new AWS.EC2();
 
-    var test = ec2.describeInstances( // return instances that match tag filter
+    ec2.describeInstances( // return instances that match tag filter
         {
             Filters: [{
                 Name: 'tag:'+tagName,
@@ -33,8 +34,8 @@ function getInstances() {
         }
     ).promise()
         .then(data => { // then step through instances and call healthcheck on each instance
-            for (reservation of data.Reservations) {
-                for (instance of reservation.Instances) {
+            for (let reservation of data.Reservations) {
+                for (let instance of reservation.Instances) {
                     checkInstance(instance);
                 }
             }
@@ -45,7 +46,7 @@ function getInstances() {
  *
  */
 function checkInstance(instance){
-    port = instance.Tags.find(tag => tag.Key=='tcp_healthcheck'); // port is set to value in tag
+    var port = instance.Tags.find(tag => tag.Key=='tcp_healthcheck'); // port is set to value in tag
     var pingThenable = Promise.promisify(tcpp.ping); // promisfy the tcp-ping ping function
     pingThenable(
         {
@@ -68,7 +69,7 @@ function checkInstance(instance){
 function setInstanceHealth(instance, missedCount) {
 
     // if missed count is greater that the max then the instance is unhealthy
-    var healthStatus = (missedCount > maxMissed)? healthStatus='Unhealthy':healthStatus='Healthy';
+    var healthStatus = (missedCount > maxMissed)? 'Unhealthy': 'Healthy';
 
     var params = {
         InstanceId: instance.InstanceId,
@@ -124,7 +125,7 @@ function putInstanceIntoDB(instance, results){
                             'missed_count': missedCount,
                             'last_seen': Date.now()
                         }
-                    }
+                    };
                     docClient.put(add_instance).promise(); // set promise to db PUT action
                 }
                 fulfill(missedCount); // return the missed count in the promise
@@ -141,14 +142,14 @@ function putInstanceIntoDB(instance, results){
  */
 function createTable(tableName, readCapacity = 4, writeCapacity = 1) {
 
-    return tablePromise = dynamodb.listTables({}).promise() // get a list of tables
+    return  dynamodb.listTables().promise() // get a list of tables
         .then(data => { // filter by tableName
             const exists = data.TableNames
                     .filter(name => {
                         return name === tableName;
                     })
                     .length > 0;
-            if (exists) { // if it exsists return
+            if (exists) { // if it exists return
                 return Promise.resolve();
             }
             else { // else create a new table with single attribute for hash key, other values will be added as JSON
