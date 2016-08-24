@@ -1,3 +1,5 @@
+'use strict';
+
 var AWS = require('aws-sdk');
 var Promise = require('bluebird');
 var tcpp = require('tcp-ping');
@@ -8,29 +10,69 @@ const tableName = 'lambda-healthcheck-v1';
 const tagName = 'tcp_healthcheck';
 const maxMissed = 3;
 
-var dynamodb = new AWS.DynamoDB();
-var docClient = new AWS.DynamoDB.DocumentClient();
-var autoscaling = new AWS.AutoScaling();
-
-
-createTable(tableName) // create the table in DynamoDB if does not exsist
+/**
+ * The handler for the Lambda function, primary funciton that gets called with each execution
+ */
+exports.handler = function handler (event, context){
+    createTable(tableName) // create the table in DynamoDB if does not exsist
     .then(getInstances(tagName)) // pull all the instances by tag that need to be health checked and perform checks
     .catch(function (err) {
         console.log(err);
     });
+};
+
 
 /**
- *
+ * Retrieve a DynamoDB table to store tcp ping results, create it if does not exist
+ */
+function createTable(tableName, readCapacity = 4, writeCapacity = 1) {
+
+    var dynamodb = new AWS.DynamoDB();
+
+    return  dynamodb.listTables().promise() // get a list of tables
+        .then(data => { // filter by tableName
+
+            const exists = data.TableNames
+                    .filter(name => {
+                        return name === tableName;
+                    })
+                    .length > 0;
+            if (exists) { // if it exists returns
+                return Promise.resolve();
+            }
+            else { // else create a new table with single attribute for hash key, other values will be added as JSON
+                var params = {
+                    TableName: tableName,
+                    AttributeDefinitions: [{AttributeName: 'ec2-id', AttributeType: 'S'}],
+                    KeySchema: [{AttributeName: 'ec2-id', KeyType: 'HASH'}],
+                    ProvisionedThroughput: {
+                        ReadCapacityUnits: readCapacity,
+                        WriteCapacityUnits: writeCapacity
+                    }
+                };
+                return dynamodb.createTable(params).promise(); // returns a promise to create table
+            }
+        });
+}
+
+
+/**
+ * Gets all EC2 instances in VPC that have the tagName defined in constants
  */
 function getInstances() {
     var ec2 = new AWS.EC2();
 
     ec2.describeInstances( // return instances that match tag filter
         {
-            Filters: [{
-                Name: 'tag:'+tagName,
-                Values: ['*']
-            }] //TODO: add filter for VPC to limit to current VPC only
+            Filters: [
+                {
+                    Name: 'instance-state-name',
+                    Values: ['running'] //TODO: Do I just want running instances
+                },
+                {
+                    Name: 'tag:' + tagName,
+                    Values: ['*']
+                }] //TODO: add filter for VPC to limit to current VPC only
         }
     ).promise()
         .then(data => { // then step through instances and call healthcheck on each instance
@@ -43,7 +85,8 @@ function getInstances() {
 }
 
 /**
- *
+ * Pings instance and if it fails increments count and sets instance to unhealthy in autoscaling group if constant
+ * maxMissed exceeded
  */
 function checkInstance(instance){
     var port = instance.Tags.find(tag => tag.Key=='tcp_healthcheck'); // port is set to value in tag
@@ -64,25 +107,7 @@ function checkInstance(instance){
 
 
 /**
- *
- */
-function setInstanceHealth(instance, missedCount) {
-
-    // if missed count is greater that the max then the instance is unhealthy
-    var healthStatus = (missedCount > maxMissed)? 'Unhealthy': 'Healthy';
-
-    var params = {
-        InstanceId: instance.InstanceId,
-        HealthStatus: healthStatus,
-        ShouldRespectGracePeriod: true
-    };
-    console.log(instance.InstanceId +' is '+ healthStatus +' with a missed count of '+ missedCount);
-    autoscaling.setInstanceHealth(params).promise().catch(reason => {console.log('ERROR '+ reason)}); // request a promise for error handling
-}
-
-
-/**
- *
+ * Looks up instance in DynamoDB and adds if not present otherwise increments missed count
  */
 function putInstanceIntoDB(instance, results){
 
@@ -94,6 +119,7 @@ function putInstanceIntoDB(instance, results){
                 Key: {'ec2-id': instance.InstanceId}
             };
 
+        var docClient = new AWS.DynamoDB.DocumentClient();
 
         docClient.get(instance_id).promise() // get instance from db
             .then(data => { // THEN
@@ -130,39 +156,31 @@ function putInstanceIntoDB(instance, results){
                 }
                 fulfill(missedCount); // return the missed count in the promise
             });
-
-      //  console.log('Instance not responding: ' + instance.InstanceId); //TODO: Add better logging outputs
+      //TODO: Add better logging outputs
 
 
     })
 }
 
-/**
- * Retrieve a DynamoDB table to store tcp ping results, create it if does not exist
- */
-function createTable(tableName, readCapacity = 4, writeCapacity = 1) {
 
-    return  dynamodb.listTables().promise() // get a list of tables
-        .then(data => { // filter by tableName
-            const exists = data.TableNames
-                    .filter(name => {
-                        return name === tableName;
-                    })
-                    .length > 0;
-            if (exists) { // if it exists return
-                return Promise.resolve();
-            }
-            else { // else create a new table with single attribute for hash key, other values will be added as JSON
-                var params = {
-                    TableName: tableName,
-                    AttributeDefinitions: [{AttributeName: 'ec2-id', AttributeType: 'S'}],
-                    KeySchema: [{AttributeName: 'ec2-id', KeyType: 'HASH'}],
-                    ProvisionedThroughput: {
-                        ReadCapacityUnits: readCapacity,
-                        WriteCapacityUnits: writeCapacity
-                    }
-                };
-                return dynamodb.createTable(params).promise();
-            }
-        });
+/**
+ *
+ */
+function setInstanceHealth(instance, missedCount) {
+
+    var autoscaling = new AWS.AutoScaling();
+
+    // if missed count is greater that the max then the instance is unhealthy
+    var healthStatus = (missedCount > maxMissed)? 'Unhealthy': 'Healthy';
+
+    var params = {
+        InstanceId: instance.InstanceId,
+        HealthStatus: healthStatus,
+        ShouldRespectGracePeriod: true
+    };
+    console.log(instance.InstanceId +' is '+ healthStatus +' with a missed count of '+ missedCount);
+    autoscaling.setInstanceHealth(params).promise().catch(reason => {console.log('ERROR '+ reason)}); // request a promise for error handling
 }
+
+
+exports.handler();
