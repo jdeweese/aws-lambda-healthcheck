@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 var AWS = require('aws-sdk');
 var Promise = require('bluebird');
@@ -9,34 +9,48 @@ AWS.config.update({region: 'us-east-1'});
 const tableName = 'lambda-healthcheck-v1';
 const tagName = 'tcp_healthcheck';
 const maxMissed = 3;
+var testContext = {invokedFunctionArn: 'arn:aws:lambda:us-east-1:651377294797:function:TcpHealthCheck'};
+var vpcId;
+
+
 
 /**
  * The handler for the Lambda function, primary funciton that gets called with each execution
  */
-exports.handler = function handler (event, context){
-    createTable(tableName) // create the table in DynamoDB if does not exsist
-    .then(getInstances(tagName)) // pull all the instances by tag that need to be health checked and perform checks
-    .catch(function (err) {
-        console.log(err);
-    });
+exports.handler = function handler (event, context, callback){
+    console.log('Starting lambda healthcheck');
+    var lambda = new AWS.Lambda();
+
+    lambda.getFunction({FunctionName: context.invokedFunctionArn}).promise()
+    .then(function(data){return getLambdaVpcId(data)}) // get the VPC id
+    .then(function(){return createTable(tableName)}) // create the table in DynamoDB if does not exsist
+    .then(function(){return getInstances(tagName)}) // pull all the instances by tag that need to be health checked and perform checks
+    .catch(function(reason){console.log('ERROR '+ reason)})
 };
+
+function getLambdaVpcId(lambdaFunction){
+    vpcId = lambdaFunction.Configuration.VpcConfig.VpcId;
+    return Promise.fulfilled();
+}
 
 
 /**
  * Retrieve a DynamoDB table to store tcp ping results, create it if does not exist
  */
-function createTable(tableName, readCapacity = 4, writeCapacity = 1) {
+function createTable(tableName, readCapacity, writeCapacity) {
+
+    readCapacity = (typeof readCapacity === 'undefined') ? 4 : readCapacity;
+    writeCapacity = (typeof writeCapacity === 'undefined') ? 1 : writeCapacity;
 
     var dynamodb = new AWS.DynamoDB();
 
     return  dynamodb.listTables().promise() // get a list of tables
-        .then(data => { // filter by tableName
+        .then(function(data){ // filter by tableName
 
             const exists = data.TableNames
-                    .filter(name => {
+                    .filter(function(name){
                         return name === tableName;
-                    })
-                    .length > 0;
+                    }).length > 0;
             if (exists) { // if it exists returns
                 return Promise.resolve();
             }
@@ -50,6 +64,7 @@ function createTable(tableName, readCapacity = 4, writeCapacity = 1) {
                         WriteCapacityUnits: writeCapacity
                     }
                 };
+                console.log('Creating table '+ tableName);
                 return dynamodb.createTable(params).promise(); // returns a promise to create table
             }
         });
@@ -59,38 +74,53 @@ function createTable(tableName, readCapacity = 4, writeCapacity = 1) {
 /**
  * Gets all EC2 instances in VPC that have the tagName defined in constants
  */
-function getInstances() {
+function getInstances(tagName) {
+
     var ec2 = new AWS.EC2();
 
     ec2.describeInstances( // return instances that match tag filter
         {
             Filters: [
                 {
+                    Name: 'vpc-id',
+                    Values: [vpcId]
+                },
+                {
                     Name: 'instance-state-name',
-                    Values: ['running'] //TODO: Do I just want running instances
+                    Values: ['running'] //only check instances that are in a running state
                 },
                 {
                     Name: 'tag:' + tagName,
                     Values: ['*']
-                }] //TODO: add filter for VPC to limit to current VPC only
+                }]
         }
     ).promise()
-        .then(data => { // then step through instances and call healthcheck on each instance
-            for (let reservation of data.Reservations) {
-                for (let instance of reservation.Instances) {
+        .then(function(data){ // then step through instances and call healthcheck on each instance
+            for (let i = 0; i < data.Reservations.length; i++) {
+                let reservation = data.Reservations[i];
+                for (let j = 0; j < reservation.Instances.length; j++){
+                    let instance = reservation.Instances[j];
+                    console.log('Checking ' + instance['InstanceId']);
                     checkInstance(instance);
                 }
             }
         });
 }
 
+
+
+
+
+
 /**
  * Pings instance and if it fails increments count and sets instance to unhealthy in autoscaling group if constant
  * maxMissed exceeded
  */
 function checkInstance(instance){
-    var port = instance.Tags.find(tag => tag.Key=='tcp_healthcheck'); // port is set to value in tag
+    var port = instance.Tags.find(function(tag){return tag.Key==='tcp_healthcheck'}); // port is set to value in tag
+    console.log('Attempting to ping instance ' + instance.InstanceId + ' at ' + instance.PrivateIpAddress +':'+ port.Value);
     var pingThenable = Promise.promisify(tcpp.ping); // promisfy the tcp-ping ping function
+
     pingThenable(
         {
             address: instance.PrivateIpAddress,
@@ -99,9 +129,9 @@ function checkInstance(instance){
             timeaouts: 5000
         }
     ).then( // insert results into dynamodb
-        data => putInstanceIntoDB(instance, data)
+        function(data){return putInstanceIntoDB(instance, data)}
     ).then( // set EC2 unhealthy
-        missedCount => setInstanceHealth(instance, missedCount)
+        function(missedCount){return setInstanceHealth(instance, missedCount)}
     );
 }
 
@@ -122,7 +152,7 @@ function putInstanceIntoDB(instance, results){
         var docClient = new AWS.DynamoDB.DocumentClient();
 
         docClient.get(instance_id).promise() // get instance from db
-            .then(data => { // THEN
+            .then(function(data){ // THEN
                 var missedCount = 0;
                 var pingReturned = (results.min != undefined); // true if ping returned
 
@@ -179,8 +209,8 @@ function setInstanceHealth(instance, missedCount) {
         ShouldRespectGracePeriod: true
     };
     console.log(instance.InstanceId +' is '+ healthStatus +' with a missed count of '+ missedCount);
-    autoscaling.setInstanceHealth(params).promise().catch(reason => {console.log('ERROR '+ reason)}); // request a promise for error handling
+    autoscaling.setInstanceHealth(params).promise().catch(function(reason){console.log('ERROR '+ reason)}); // request a promise for error handling
 }
 
 
-exports.handler();
+exports.handler(null, testContext);
