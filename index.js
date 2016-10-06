@@ -1,10 +1,10 @@
 "use strict";
 
+console.log('Loading Lambda health check function');
+
 var AWS = require('aws-sdk');
 var Promise = require('bluebird');
 var tcpp = require('tcp-ping');
-
-AWS.config.update({region: 'us-east-1'});
 
 const tableName = 'lambda-healthcheck-v1';
 const tagName = 'tcp_healthcheck';
@@ -12,22 +12,35 @@ const maxMissed = 3;
 var testContext = {invokedFunctionArn: 'arn:aws:lambda:us-east-1:651377294797:function:TcpHealthCheck'};
 var vpcId;
 
-
-
 /**
- * The handler for the Lambda function, primary funciton that gets called with each execution
+ * The handler for the Lambda function, primary function that gets called with each execution
  */
 exports.handler = function handler (event, context, callback){
     console.log('Starting lambda healthcheck');
+
+    var functionArn = context.invokedFunctionArn;
+    var region = functionArn.split(':')[3];
+    AWS.config.update({region: region});
+
     var lambda = new AWS.Lambda();
 
-    lambda.getFunction({FunctionName: context.invokedFunctionArn}).promise()
+    lambda.getFunction({FunctionName: functionArn}).promise()
     .then(function(data){return getLambdaVpcId(data)}) // get the VPC id
     .then(function(){return createTable(tableName)}) // create the table in DynamoDB if does not exsist
     .then(function(){return getInstances(tagName)}) // pull all the instances by tag that need to be health checked and perform checks
-    .catch(function(reason){console.log('ERROR '+ reason)})
+    .catch(
+                function (error){
+                console.log('Error in Lambda Health Check \n'+error);
+                }
+        );
+
+    callback(null, 'success');
 };
 
+
+/**
+ * Retrieve a DynamoDB table to store tcp ping results, create it if does not exist
+ */
 function getLambdaVpcId(lambdaFunction){
     vpcId = lambdaFunction.Configuration.VpcConfig.VpcId;
     return Promise.fulfilled();
@@ -67,7 +80,11 @@ function createTable(tableName, readCapacity, writeCapacity) {
                 console.log('Creating table '+ tableName);
                 return dynamodb.createTable(params).promise(); // returns a promise to create table
             }
-        });
+        }).catch(
+                function (error){
+                console.log('Error creating DynamoDB table\n'+error);
+                }
+        );
 }
 
 
@@ -104,7 +121,11 @@ function getInstances(tagName) {
                     checkInstance(instance);
                 }
             }
-        });
+        }).catch(
+                function (error){
+                console.log('Error getting instances\n'+error);
+                }
+        );
 }
 
 
@@ -132,6 +153,10 @@ function checkInstance(instance){
         function(data){return putInstanceIntoDB(instance, data)}
     ).then( // set EC2 unhealthy
         function(missedCount){return setInstanceHealth(instance, missedCount)}
+    ).catch(
+                function (error){
+                console.log('Error checking instance\n'+error);
+                }
     );
 }
 
@@ -185,7 +210,12 @@ function putInstanceIntoDB(instance, results){
                     docClient.put(add_instance).promise(); // set promise to db PUT action
                 }
                 fulfill(missedCount); // return the missed count in the promise
-            });
+            })
+            .catch(
+                function (error){
+                console.log('Error adding instance to database \n'+error);
+                }
+        );
       //TODO: Add better logging outputs
 
 
@@ -213,4 +243,4 @@ function setInstanceHealth(instance, missedCount) {
 }
 
 
-exports.handler(null, testContext);
+// exports.handler(null, testContext, function(returned){console.log('Function returned '+returned)});
