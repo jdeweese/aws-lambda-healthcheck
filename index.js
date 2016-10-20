@@ -129,10 +129,6 @@ function getInstances(tagName) {
 }
 
 
-
-
-
-
 /**
  * Pings instance and if it fails increments count and sets instance to unhealthy in autoscaling group if constant
  * maxMissed exceeded
@@ -216,15 +212,12 @@ function putInstanceIntoDB(instance, results){
                 console.log('Error adding instance to database \n'+error);
                 }
         );
-      //TODO: Add better logging outputs
-
-
     })
 }
 
 
 /**
- *
+ * Sets the health state in the autoscaling group
  */
 function setInstanceHealth(instance, missedCount) {
 
@@ -239,7 +232,7 @@ function setInstanceHealth(instance, missedCount) {
         ShouldRespectGracePeriod: true
     };
     console.log(instance.InstanceId +' is '+ healthStatus +' with a missed count of '+ missedCount);
-    autoscaling.setInstanceHealth(params).promise().catch(function(reason){console.log('ERROR '+ reason)}); // request a promise for error handling
+    autoscaling.setInstanceHealth(params).promise().catch(function(error){console.log('Error setting instance health, may not be part of an autoscaling group \n'+ error)}); // request a promise for error handling
 }
 
 
