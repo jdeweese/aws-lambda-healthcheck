@@ -1,0 +1,54 @@
+Resources:
+  HealthCheckRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "healthcheck"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "ec2:CreateNetworkInterface"
+                  - "ec2:DescribeNetworkInterfaces"
+                  - "ec2:DetachNetworkInterface"
+                  - "ec2:DeleteNetworkInterface"
+                  - "ec2:DescribeInstances"
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+              -
+                Effect: "Allow"
+                Action: "autoscaling:SetInstanceHealth"
+                Resource: "*"
+              -
+                Effect: "Allow"
+                Action: "lambda:*"
+                Resource: "*"
+  HealthCheck:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.handler"
+      Role:
+        Fn::GetAtt:
+          - "HealthCheckRole"
+          - "Arn"
+      Code:
+        S3Bucket: "jasonmd-lambda-functions"
+        S3Key: "amilookup.zip"
+      Runtime: "nodejs4.3"
+      Timeout: "25"
