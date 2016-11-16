@@ -6,11 +6,14 @@ var AWS = require('aws-sdk');
 var Promise = require('bluebird');
 var tcpp = require('tcp-ping');
 
-const tableName = 'lambda-healthcheck-v1';
+const tableName = 'lambda-healthcheck';
 const tagName = 'tcp_healthcheck';
 const maxMissed = 3;
+const DbReadCapacity = 10;
+const DbWriteCapacity = 1;
 var testContext = {invokedFunctionArn: 'arn:aws:lambda:us-east-1:651377294797:function:TcpHealthCheck'};
 var vpcId;
+
 
 /**
  * The handler for the Lambda function, primary function that gets called with each execution
@@ -26,13 +29,14 @@ exports.handler = function handler (event, context, callback){
 
     lambda.getFunction({FunctionName: functionArn}).promise()
     .then(function(data){return getLambdaVpcId(data)}) // get the VPC id
-    .then(function(){return createTable(tableName)}) // create the table in DynamoDB if does not exsist
+    .then(function(){return createTable(tableName, DbReadCapacity, DbWriteCapacity)}) // create the table in DynamoDB if does not exsist
     .then(function(){return getInstances(tagName)}) // pull all the instances by tag that need to be health checked and perform checks
+    .then(function(){return purgeDbEntries()})
     .catch(
                 function (error){
                 console.log('Error in Lambda Health Check \n'+error);
                 }
-        );
+    );
 
     callback(null, 'success');
 };
@@ -70,12 +74,31 @@ function createTable(tableName, readCapacity, writeCapacity) {
             else { // else create a new table with single attribute for hash key, other values will be added as JSON
                 var params = {
                     TableName: tableName,
-                    AttributeDefinitions: [{AttributeName: 'ec2-id', AttributeType: 'S'}],
+                    AttributeDefinitions: [
+                        {AttributeName: 'ec2-id', AttributeType: 'S'},
+                        {AttributeName: 'vpc-id', AttributeType: 'S'},
+                        {AttributeName: 'last_seen', AttributeType: 'N'}
+                    ],
                     KeySchema: [{AttributeName: 'ec2-id', KeyType: 'HASH'}],
                     ProvisionedThroughput: {
                         ReadCapacityUnits: readCapacity,
                         WriteCapacityUnits: writeCapacity
-                    }
+                    },
+                    GlobalSecondaryIndexes: [
+                        {
+                            IndexName: 'timestamp',
+                            KeySchema: [
+                                {AttributeName: 'vpc-id', KeyType: 'HASH'},
+                                {AttributeName: 'last_seen', KeyType: 'RANGE'}],
+                            Projection: {
+                              ProjectionType: 'ALL'
+                            },
+                            ProvisionedThroughput: {
+                                ReadCapacityUnits: 1,
+                                WriteCapacityUnits: 1
+                            }
+                        }
+                    ]
                 };
                 console.log('Creating table '+ tableName);
                 return dynamodb.createTable(params).promise(); // returns a promise to create table
@@ -199,6 +222,7 @@ function putInstanceIntoDB(instance, results){
                         TableName: tableName,
                         Item: {
                             'ec2-id': instance.InstanceId,
+                            'vpc-id': vpcId,
                             'missed_count': missedCount,
                             'last_seen': Date.now()
                         }
@@ -209,7 +233,7 @@ function putInstanceIntoDB(instance, results){
             })
             .catch(
                 function (error){
-                console.log('Error adding instance to database \n'+error);
+                    console.log('Error adding instance to database \n'+error);
                 }
         );
     })
@@ -224,16 +248,66 @@ function setInstanceHealth(instance, missedCount) {
     var autoscaling = new AWS.AutoScaling();
 
     // if missed count is greater that the max then the instance is unhealthy
-    var healthStatus = (missedCount > maxMissed)? 'Unhealthy': 'Healthy';
+    var healthStatus = (missedCount > maxMissed) ? 'Unhealthy' : 'Healthy';
 
     var params = {
         InstanceId: instance.InstanceId,
         HealthStatus: healthStatus,
         ShouldRespectGracePeriod: true
     };
-    console.log(instance.InstanceId +' is '+ healthStatus +' with a missed count of '+ missedCount);
-    autoscaling.setInstanceHealth(params).promise().catch(function(error){console.log('Error setting instance health, may not be part of an autoscaling group \n'+ error)}); // request a promise for error handling
+    console.log(instance.InstanceId + ' is ' + healthStatus + ' with a missed count of ' + missedCount);
+    if (heathStatus == 'Unhealthy') {
+        autoscaling.setInstanceHealth(params).promise().catch(function (error) {
+            console.log('Error setting instance health, may not be part of an autoscaling group \n' + error)
+        }); // request a promise for error handling
+    }
+}
+
+function purgeDbEntries(){
+
+    var weekAgo = new Date();
+    //Date.now(); // create an variable with the date a week ago
+    weekAgo.setDate(weekAgo.getDate() - 0);
+
+    var queryParams = {
+      TableName: tableName,
+      IndexName: "timestamp",
+      KeyConditionExpression: "#vid = :hkey AND #ls < :rkey",
+      ExpressionAttributeNames:{
+          "#vid": "vpc-id",
+          "#ls": "last_seen"
+      },
+      ExpressionAttributeValues: {
+        ":hkey": vpcId,
+        ":rkey": weekAgo.getTime()
+      }
+    };
+
+    var docClient = new AWS.DynamoDB.DocumentClient();
+
+    docClient.query(queryParams).promise()
+    .then(function(results){
+
+        for (let i = 0; i < results.Items.length; i++){
+            let deleteParams = {
+                TableName: tableName,
+                Key: {
+                    'ec2-id': results.Items[i]['ec2-id']
+                }
+            }
+            docClient.delete(deleteParams);
+        }
+
+    })
+    .catch(
+        function(error){
+            console.log('Error purging old entries from database.\n'+error);
+        }
+    );
+
+    return Promise.fulfilled(); // return promise to top level
+
 }
 
 
-// exports.handler(null, testContext, function(returned){console.log('Function returned '+returned)});
+exports.handler(null, testContext, function(returned){console.log('Function returned '+returned)});
