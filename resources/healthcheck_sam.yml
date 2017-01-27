@@ -1,3 +1,6 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "A lambda function that runs inside a VPC and performs a TCP ping for any configure EC2 service"
 Parameters: 
   VpcId: 
     Type: "AWS::EC2::VPC::Id"
@@ -32,7 +35,6 @@ Resources:
                   - "ec2:DetachNetworkInterface"
                   - "ec2:DeleteNetworkInterface"
                   - "ec2:DescribeInstances"
-                  - "ec2:RebootInstances"
                   - "logs:CreateLogGroup"
                   - "logs:CreateLogStream"
                   - "logs:PutLogEvents"
@@ -40,8 +42,8 @@ Resources:
               - 
                 Effect: "Allow"
                 Action:
-                  - "dynamodb:ListTables"
                   - "dynamodb:CreateTable"
+                  - "dynamodb:ListTables"
                   - "dynamodb:DeleteItem"
                   - "dynamodb:GetItem"
                   - "dynamodb:PutItem"
@@ -64,43 +66,33 @@ Resources:
     Properties:
       GroupDescription: "Security Group created for lambda health check within VPC"
       VpcId: !Ref "VpcId"
- 
-  # Creates the Lambda function from the code uploaded in S3 bucket
-  HealthCheck: 
-    Type: "AWS::Lambda::Function"
-    Properties: 
+   
+  #  SAM definition of the health check function    
+  HealthCheck:
+    Type: "AWS::Serverless::Function"
+    Properties:
       Handler: "index.handler"
-      Role: !GetAtt "HealthCheckRole.Arn"
-      Code: 
-        S3Bucket: "jasonmd-lambda-functions"
-        S3Key: "lambda-healthcheck.zip"
+      Runtime: nodejs4.3
+      CodeUri: 's3://jasonmd-lambda-functions/lambda-healthcheck.zip'
       Description: "a lambda functions that checks and EC2 in the VPC that has the proper tags"
-      FunctionName: "healthcheck"
-      Runtime: "nodejs4.3"
-      Timeout: "25"
+      Timeout: 25
+      Role: !GetAtt "HealthCheckRole.Arn"
+      Events:
+        Timer:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
       VpcConfig:
         SecurityGroupIds:
           - !GetAtt "HealthCheckSG.GroupId"
-        SubnetIds: !Ref "SubnetIds"
-
-  # CloudWatch event to fire health check every minute
-  ScheduledRule: 
-    Type: "AWS::Events::Rule"
-    Properties: 
-      Description: "ScheduledHealthCheckRule"
-      ScheduleExpression: "rate(1 minute)"
-      State: "ENABLED"
-      Targets: 
-        - 
-          Arn: 
-            !GetAtt "HealthCheck.Arn"
-          Id: "TargetFunctionV1"
-  PermissionForEventsToInvokeLambda: 
-    Type: "AWS::Lambda::Permission"
-    Properties: 
-      FunctionName: 
-        Ref: "HealthCheck"
-      Action: "lambda:InvokeFunction"
-      Principal: "events.amazonaws.com"
-      SourceArn: 
-        !GetAtt "ScheduledRule.Arn" 
+        SubnetIds: 
+          - !Ref 'SubnetIds'
+        #  - subnet-6811f230
+        #  - subnet-7bb7aa50
+        #  - subnet-3db47c4b
+Outputs:
+  TestOutput:
+    Description: "Test output"
+    Value: !Join
+      - ':'
+      - !Ref 'SubnetIds'

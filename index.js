@@ -186,7 +186,6 @@ function checkInstance(instance){
 function putInstanceIntoDB(instance, results){
 
     return new Promise(function (fulfill, reject) {
-        //TODO: Remove any old db instance entries
 
         var instance_id = {  //query parameters to find instance in dynamodb
                 TableName: tableName,
@@ -256,13 +255,42 @@ function setInstanceHealth(instance, missedCount) {
         ShouldRespectGracePeriod: true
     };
     console.log(instance.InstanceId + ' is ' + healthStatus + ' with a missed count of ' + missedCount);
-    if (heathStatus == 'Unhealthy') {
+    if (healthStatus == 'Unhealthy') {
         autoscaling.setInstanceHealth(params).promise().catch(function (error) {
-            console.log('Error setting instance health, may not be part of an autoscaling group \n' + error)
+            console.log('Error setting instance health, may not be part of an autoscaling group \n' + error);
+            console.log('Trying to reboot instance instead');
+            rebootInstance(instance);
+
+
         }); // request a promise for error handling
     }
 }
 
+/**
+ * Reboots an EC2 instance that is not responding
+ */
+function rebootInstance (instance){
+
+    var ec2 = new AWS.EC2();
+
+    var params = {
+      InstanceIds: [
+        instance.InstanceId
+      ],
+      DryRun: false
+    };
+    ec2.rebootInstances(params).promise()
+        .then(function(){
+            console.log("Reboot completed");
+        })
+        .catch(function (error) {
+            console.log('Error rebooting instance \n' + error);
+        });
+}
+
+/**
+ * Purges entries in database for EC2 instances not seen for a week
+ */
 function purgeDbEntries(){
 
     var weekAgo = new Date();
